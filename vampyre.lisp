@@ -5,45 +5,10 @@
 ;; Establish communication websocket.
 ;; Add port configuration.
 
-;;; Delivery Server
-;;; ===============
-
-;;; Subclass ACCEPTOR
-(defclass vhost (hunchentoot:acceptor)
-  ;; slots
-  ((dispatch-table
-    :initform '()
-    :accessor dispatch-table
-    :documentation "List of dispatch functions"))
-  ;; options
-  (:default-initargs                    ; default-initargs must be used
-   :address "127.0.0.1"))               ; because ACCEPTOR uses it
-
-;;; Specialise ACCEPTOR-DISPATCH-REQUEST for VHOSTs
-(defmethod hunchentoot:acceptor-dispatch-request ((vhost vhost) request)
-  ;; try REQUEST on each dispatcher in turn
-  (mapc (lambda (dispatcher)
-    (let ((handler (funcall dispatcher request)))
-      (when handler               ; Handler found. FUNCALL it and return result
-        (return-from hunchentoot:acceptor-dispatch-request (funcall handler)))))
-  (dispatch-table vhost))
-  (call-next-method))
-
-;; Combines both websocket server and regular web server in a single acceptor.
-(defclass super-acceptor (vhost
-			  hunchensocket:websocket-acceptor)
-  ())
 
 ;;; HOOKS
 ;;; =====
 
-(defun send-test-page ()
-  (setf (hunchentoot:content-type*) "text/html")
-  (cl-who:with-html-output (*standard-output* nil :prologue nil)
-    (:html
-     (:body
-      (:h1 "Hello World!")
-      (:script :type "text/javascript" :src "/script.js")))))
 
 (defun basic-websocket-puppet (uri)
   (parenscript:ps
@@ -125,21 +90,6 @@
   (setf (hunchentoot:content-type*) "text/javascript")
   (format nil (basic-websocket-puppet *websocket-connect-back*)))
 
-(defun define-stage-one-url (url agent-delivery-fun acceptor)
-  (format t "Adding delivery page: ~a...~%" url)
-  (push (hunchentoot:create-prefix-dispatcher url agent-delivery-fun)
-	(dispatch-table acceptor)))
-
-(defun define-test-url (url send-test-page-fun acceptor)
-  (format t "Adding test page: ~a...~%" url)
-  (push (hunchentoot:create-prefix-dispatcher url send-test-page-fun)
-	(dispatch-table acceptor)))
-
-(defun define-script-delivery-urls (url-list script-fun acceptor)
-  (loop
-     for url in url-list
-     do (define-stage-one-url url script-fun acceptor)))
-
 
 ;; Websocket C2 Server
 ;; ===================
@@ -195,27 +145,15 @@
 ;; Start and Stop the main Hunchentoot Server
 ;; ==========================================
 
-(defvar *delivery-server-port* 4242)
+
 (defparameter *websocket-port* 4445)
 (defparameter *master-port* 4000)
 
-(defvar *delivery-server* nil)
 (defparameter *puppet-master-server* nil)
 (defparameter *master-server* nil)
 
 (defparameter *websocket-uri* "/master")
 (defvar *puppet-master* (make-instance 'master :name *websocket-uri*))
-
-(defun start-delivery-server ()
-  (stop-delivery-server)
-  (format t "Starting Delivery server on port ~a...~%" *delivery-server-port*)
-  (hunchentoot:start (setf *delivery-server* (make-instance 'vhost :port *delivery-server-port*))))
-
-(defun stop-delivery-server ()
-  (when *delivery-server*
-    (hunchentoot:stop *delivery-server*)
-    (format t "Stopped Delivery server.~%")
-    (setf *delivery-server* NIL)))
 
 
 ;; TODO: Add a parameter to configure the port from default.
