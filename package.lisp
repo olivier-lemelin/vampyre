@@ -1,9 +1,9 @@
 (defpackage vampyre.utils
   (:use cl)
-  (:export :display-pairs :get-values))
+  (:export :display-pairs :get-values :random-name))
 
 (defpackage vampyre.delivery-server
-  (:use cl hunchentoot hunchensocket ascii-table vampyre.utils)
+  (:use cl hunchentoot hunchensocket ascii-table vampyre.utils parenscript)
   (:shadow :listen))
 
 (defpackage vampyre

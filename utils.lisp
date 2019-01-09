@@ -7,3 +7,10 @@
 
 (defun get-values (alist)
   (loop for i in alist collect (cdr i)))
+
+(defun random-name (len)
+  (let ((char-list (string "ABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+    (coerce
+     (loop for i upto (- len 1) collect
+	  (char char-list (random (length char-list))))
+'string)))

