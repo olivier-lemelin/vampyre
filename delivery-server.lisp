@@ -17,6 +17,29 @@
   (:default-initargs                    ; default-initargs must be used
    :address "127.0.0.1"))               ; because ACCEPTOR uses it
 
+(defclass websocket-channel (hunchensocket:websocket-resource)
+  ((uri :initarg :uri
+	 :initform (error "Choose a URI for this websocket-channel!")
+	 :reader uri))
+  (:default-initargs :client-class 'puppet-client))
+
+;;; This is our main delivery server class.
+(defclass delivery-server (virtual-host hunchensocket:websocket-acceptor)
+  ((deliverer
+    :initarg :deliverer
+    :initform (error "Please name this delivery server!")
+    :reader deliverer
+    :documentation "Name of this delivery server.")
+   (websocket-channels
+    :initform (make-hash-table :test 'equal)
+    :accessor websocket-channels
+    :documentation "List of websocket handlers.")
+  (url-table
+    :initform (make-hash-table :test 'equal)
+    :accessor url-table
+    :documentation "User-accessible URL table that is used while rebuilding the server's dispatch table.")))
+
+
 
 ;;; Specialise ACCEPTOR-DISPATCH-REQUEST for VHOSTs
 (defmethod hunchentoot:acceptor-dispatch-request ((vhost virtual-host) request)
@@ -53,25 +76,35 @@
 (defmethod message ((puppet puppet-client) message)
   (hunchensocket:send-text-message puppet message))
 
+(defmethod make-execution-command (command)
+  (jsown:to-json `(:obj ("type" . "exec") ("command" . ,command))))
 
 (defmethod get-puppet ((chan websocket-channel) puppet-name)
   (find-if #'(lambda (element) (string= (name element) puppet-name))
 	   (hunchensocket:clients chan)))
 
+(defmethod get-channel-puppets ((chan websocket-channel))
+  (hunchensocket:clients chan))
+
+(defmethod get-server-puppets ((server delivery-server))
+  (alexandria:flatten
+   (loop for key being the hash-keys of (websocket-channels server)
+	   using (hash-value value)
+	 collect (get-channel-puppets value))))
+
+(defun get-all-puppets ()
+  (loop for server in *delivery-servers* collect
+	(get-server-puppets server)))
+
 
 (defmethod hunchensocket:text-message-received ((master websocket-channel) (puppet puppet-client) message)
   (v:log :debug :message (format nil "New message from ~a: ~a~%" (name puppet) message))
-)
+  )
 
 
 ;;; Puppet resource
 ;;; ---------------
 
-(defclass websocket-channel (hunchensocket:websocket-resource)
-  ((uri :initarg :uri
-	 :initform (error "Choose a URI for this websocket-channel!")
-	 :reader uri))
-  (:default-initargs :client-class 'puppet-client))
 
 
 (defun make-websocket-channel (uri)
@@ -101,21 +134,6 @@
 (defvar *delivery-servers* '())
 
 
-;;; This is our main delivery server class.
-(defclass delivery-server (virtual-host hunchensocket:websocket-acceptor)
-  ((deliverer
-    :initarg :deliverer
-    :initform (error "Please name this delivery server!")
-    :reader deliverer
-    :documentation "Name of this delivery server.")
-   (websocket-channels
-    :initform (make-hash-table :test 'equal)
-    :accessor websocket-channels
-    :documentation "List of websocket handlers.")
-  (url-table
-    :initform (make-hash-table :test 'equal)
-    :accessor url-table
-    :documentation "User-accessible URL table that is used while rebuilding the server's dispatch table.")))
 
 
 (defun make-delivery-server (port name)
