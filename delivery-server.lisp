@@ -79,6 +79,10 @@
 (defmethod make-execution-command (command)
   (jsown:to-json `(:obj ("type" . "exec") ("command" . ,command))))
 
+(defmethod send-execution ((puppet puppet-client) command)
+  (let ((res (make-execution-command command)))
+    (message puppet res)))
+
 (defmethod get-puppet ((chan websocket-channel) puppet-name)
   (find-if #'(lambda (element) (string= (name element) puppet-name))
 	   (hunchensocket:clients chan)))
@@ -93,13 +97,72 @@
 	 collect (get-channel-puppets value))))
 
 (defun get-all-puppets ()
-  (loop for server in *delivery-servers* collect
-	(get-server-puppets server)))
+  (alexandria:flatten
+   (loop for server in *delivery-servers*
+	 collect (get-server-puppets server))))
 
+(defun find-puppet (puppet-name)
+  (find-if #'(lambda (element) (string= (name element) puppet-name))
+	   (get-all-puppets)))
+
+(defun prompt-read (prompt)
+  (format *query-io* "~a> " prompt)
+  (force-output *query-io*)
+  (read *query-io*))
+
+(defun js-alert (message)
+  (parenscript:ps (alert (ps:lisp message))))
+
+(defun js-message-back (mess)
+  (parenscript:ps (send-message (ps:lisp mess))))
+
+(defun js-new-tab (url)
+  (parenscript:ps
+    (chain window (open (ps:lisp url) "_blank"))))
+
+(defun js-pop-under (url)
+  (parenscript:ps
+    (chain document
+	   (add-event-listener
+	    "click"
+	    (lambda () (setf new-win (chain window (open (ps:lisp url)
+							 "popunder"
+							 "toolbar=0,location=0,directories=0,status=0,menubar=0,scrollbars=0,resizable=0")))
+	      (chain new-win (blur))
+	      (chain new-win (focus))
+	      (chain document (remove-event-listener "click" (chain arguments callee)))
+	      NIL)))))
+
+(defun make-ajax-request (url verb)
+  (parenscript:ps
+    (setf req (new (-X-M-L-Http-Request)))
+    (chain req (open (ps:lisp verb) (ps:lisp url) T))
+    (setf (chain req onreadystatechange)
+	  (lambda ()
+	    (if (and (equal (chain req ready-state) 4)
+		     (equal (chain req status) 200))
+	      (chain console (log (chain req response-text))))))
+    (chain req (send))))
+
+
+(defun with-puppet (puppet command)
+  (let ((p puppet)
+	(com (first command))
+	(args (rest command)))
+    `(,com ,p ,args)))
+
+;; (defun interact-with-puppet (name)
+;;   (let ((puppet (find-puppet name))
+;; 	 (command '()))
+;;     (loop do
+;;       (setf command (prompt-read name))
+;;       (when (not (symbolp command))
+;; 	(apply (alexandria:curry (first command) puppet)
+;; 	       (rest command)))
+;; 	  while (not (equal command :exit)))))
 
 (defmethod hunchensocket:text-message-received ((master websocket-channel) (puppet puppet-client) message)
-  (v:log :debug :message (format nil "New message from ~a: ~a~%" (name puppet) message))
-  )
+  (v:log :debug :message (format nil "New message from ~a: ~a~%" (name puppet) message)))
 
 
 ;;; Puppet resource
@@ -120,7 +183,21 @@
 (defmethod hunchensocket:client-disconnected ((master websocket-channel) (puppet puppet-client))
   (v:log :info :leave (format nil "Puppet ~a (~a) has disconnected from ~a." (name puppet) (name puppet) (uri master))))
 
-
+(defmethod hunchensocket:text-message-received ((master websocket-channel) (puppet puppet-client) message)
+  (handler-case 
+      (let* ((parsed (jsown:parse message))
+	     (type (jsown:val parsed "type")))
+	(alexandria:switch (type :test 'equal)
+	  ("ping"
+	   NIL)
+	  ("message"
+	   (v:log :info :message (format nil "Received a message from ~a: '~a'" (name puppet) (jsown:val parsed "message"))))
+	  (:default
+	   (v:log :warning :message (format nil "Received a message with unknown formatting from ~a: '~a'" (name puppet) message)))))
+    (t (c)
+      (v:log :error :message (format nil "UNKNOWN Message from ~a: '~a'" (name puppet) message))
+      (values 0 c))))
+  
 (defmethod get-websocket-channel ((server delivery-server) uri)
   (gethash uri (websocket-channels server)))
 
@@ -289,6 +366,8 @@
   (setf (hunchentoot:content-type*) "text/html")
   
   ;; Sets the headers to Apache defaults.
+  (setf (header-out "access-control-allow-origin") "*")
+  (setf (header-out "Access-Control-Allow-Methods") "POST, GET")
   (setf (header-out "accept-Ranges") "bytes")
   (setf (header-out "connection") "Keep-Alive")
   (setf (header-out "content-Encoding") "gzip")
@@ -296,9 +375,9 @@
   (setf (header-out "keep-Alive") "timeout=5, max=100")
   (setf (header-out "last-Modified") "Sun, 06 Jan 2019 23:06:26 GMT")
   (setf (header-out "server") "Apache/2.4.18 (Ubuntu)")
-  (setf (header-out "vary") "Accept-Encoding")
-  (setf (header-out "accept-Ranges") "bytes")
-
+  (setf (header-out "vary") "Origin")
+  (setf (header-out "accept-ranges") "bytes")
+  
   ;; GZip the resulting page.
   (gzip-compress 
    (cl-who:with-html-output-to-string (*standard-output* nil)
@@ -358,12 +437,14 @@
 
     ;; Defines the function to call as soon as the websocket is open.
     (defun on-open (event)
-      (setf obj (create type "my-type"))
-      (chain *socket* (send (chain -J-S-O-N (stringify obj))))
-
       ;; Setup the Pings.
       (chain window (set-interval send-ping *keep-alive-interval*))
       ())
+
+    (defun send-message (m)
+      (setf obj (create type "message"
+			message m))
+      (chain *socket* (send (chain -J-S-O-N (stringify obj)))))
 
     ;; Test on-message function.
     (defun on-message (event)
@@ -414,9 +495,14 @@
 
     ;; Binds the listener to the on-open function.
     (setf (getprop *socket* 'onopen) on-open)
-    (setf (getprop *socket* 'onmessage) on-message)))
+    (setf (getprop *socket* 'onmessage) on-message)
+
+    (setf (getprop console 'log) send-message)))
 
 
 (defun send-stage-one (connect-back-url)
   (setf (hunchentoot:content-type*) "text/javascript")
+  (setf (header-out "access-control-allow-origin") "*")
+  (setf (header-out "Access-Control-Allow-Methods") "POST, GET")
+
   (format nil (basic-websocket-puppet connect-back-url)))
